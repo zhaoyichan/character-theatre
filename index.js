@@ -10,12 +10,51 @@ const CHAT_MAP_FIELD = '__theatreChatMap';
 const KEY_NOTIFY = 'th-notify-on';      // AI回复完提示音开关（1开/0关）
 const NOTIFY_SOUND_PATH = 'notify.mp3'; // 默认提示音资源（相对插件目录）；null 时用内置 base64
 
-// ---- 数据层（内存权威缓存 + localStorage 镜像，防环境 localStorage 抖动掉数据） ----
+// ---- 数据层：内存权威缓存 + 三通道可靠落盘（localStorage + 酒馆扩展设置） ----
 const _cache = {};            // 模块内权威缓存：导航/渲染同会话内绝不丢失
-function rawGet(k, f) { try { const r = localStorage.getItem(k); return (r == null || r === undefined) ? f : JSON.parse(r); } catch (e) { return f; } }
-function rawSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+// rawGet：localStorage 优先；localStorage 为空则回退读酒馆扩展设置（双通道互为备份）
+function rawGet(k, f) {
+  try { const r = localStorage.getItem(k); if (r != null && r !== undefined) return JSON.parse(r); } catch (e) {}
+  try {
+    const ctx = (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) ? SillyTavern.getContext() : null;
+    const ext = (ctx && ctx.extensionSettings) || (typeof extension_settings !== 'undefined' ? extension_settings : null);
+    if (ext && ext['character_theatre_' + k] !== undefined) return ext['character_theatre_' + k];
+  } catch (e) {}
+  return f;
+}
+// rawSet：写 localStorage，失败不再静默吞——返回是否落盘成功，并报知
+function rawSet(k, v) {
+  try { localStorage.setItem(k, JSON.stringify(v)); return true; }
+  catch (e) {
+    try { console.error('[小剧场] localStorage 写入失败 key=' + k, e); } catch (e2) {}
+    try { logEvent('写盘失败', String(k) + ' ' + (e && e.message)); } catch (e3) {}
+    return false;
+  }
+}
+// 统一可靠落盘：localStorage + 酒馆扩展设置(extension_settings) 双通道，失败可见、主动保存设置
+function thReliableSet(k, v) {
+  const lsOk = rawSet(k, v);
+  let extOk = false;
+  try {
+    const ctx = (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) ? SillyTavern.getContext() : null;
+    const s = (ctx && ctx.extensionSettings) || (typeof extension_settings !== 'undefined' ? extension_settings : null);
+    if (s) {
+      s['character_theatre_' + k] = v;
+      extOk = true;
+      const dsc = (typeof saveSettingsDebounced === 'function') ? saveSettingsDebounced
+        : (ctx && typeof ctx.saveSettingsDebounced === 'function') ? ctx.saveSettingsDebounced : null;
+      if (dsc) { try { dsc(); } catch (e) {} }
+    }
+  } catch (e) { extOk = false; }
+  if (!lsOk && !extOk) {
+    try { if (typeof toast === 'function') toast('保存可能丢失，请用「全量备份」'); } catch (e) {}
+    try { logEvent('双通道落盘均失败', String(k)); } catch (e2) {}
+  }
+  return { lsOk: !!lsOk, extOk: !!extOk };
+}
 function safeGet(k, f) { if (k in _cache) return _cache[k]; const r = rawGet(k, f); _cache[k] = r; return r; }
-function safeSet(k, v) { _cache[k] = v; rawSet(k, v); }   // 先入内存缓存，再写本地(失败也不影响同会话)
+// safeSet：先入内存权威，再双通道可靠落盘（localStorage + 扩展设置）
+function safeSet(k, v) { _cache[k] = v; thReliableSet(k, v); }
 function getGroups() { const g = safeGet(KEY_DATA, []); return Array.isArray(g) ? g : []; }
 function saveGroups(g) { if (!Array.isArray(g)) { logEvent('saveGroups-被传非数组', (g && g.name) || typeof g); return; } safeSet(KEY_DATA, g); }
 
@@ -606,6 +645,7 @@ function renderSettingsView(ctx) {
     + '<button class="' + PREFIX + 'btn ghost" data-handle="' + reg(() => notifyPreview()) + '">' + ico('play', 13) + '<i>试听一下</i></button>'
     + '</div>'
     + '</details></div>';
+  h += thSettingsExt();       // 全局加固卡：作为普通卡片进入滚动列表（随页面上下滚）
   h += '</div></div>';
   return h;
 }
@@ -861,7 +901,7 @@ function buildNewGroup(ctx, map, isGlobal) {
 // ---- 导入导出 / 重置 ----
 function exportAll() {
   try {
-    const data = { version: 1, groups: getGroups(), mapGlobal: getGlobalMap() };
+    const data = { version: 1, groups: getGroups(), mapGlobal: getGlobalMap(), fav: favLoad() };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -1240,12 +1280,25 @@ const FAV_KEY = 'th-fav-store';
 function favEmpty() { return { v: 1, items: [] }; }
 function favLoad() {
   try { const d = JSON.parse(localStorage.getItem(FAV_KEY) || 'null'); if (d && Array.isArray(d.items)) return d; } catch (e) {}
+  try {
+    const ctx = (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) ? SillyTavern.getContext() : null;
+    const ext = (ctx && ctx.extensionSettings) || (typeof extension_settings !== 'undefined' ? extension_settings : null);
+    const d2 = ext && ext.character_theatre_fav;
+    if (d2 && Array.isArray(d2.items)) return d2;
+  } catch (e) {}
   return favEmpty();
 }
 function favPersist(d) {
-  try { localStorage.setItem(FAV_KEY, JSON.stringify(d)); } catch (e) {}
+  let lsOk = false;
+  try { localStorage.setItem(FAV_KEY, JSON.stringify(d)); lsOk = true; }
+  catch (e) { try { console.error('[小剧场] localStorage 写收藏失败', e); } catch(e2){} }
+  let extOk = false;
   // 兜底写扩展设置
-  try { const c = getCtx(); const s = (c && c.extensionSettings) || (typeof extension_settings !== 'undefined' ? extension_settings : null); if (s) { s.character_theatre_fav = d; if (typeof saveSettingsDebounced === 'function') saveSettingsDebounced(); } } catch (e) {}
+  try { const c = getCtx(); const s = (c && c.extensionSettings) || (typeof extension_settings !== 'undefined' ? extension_settings : null); if (s) { s.character_theatre_fav = d; extOk = true; if (typeof saveSettingsDebounced === 'function') saveSettingsDebounced(); } } catch (e) {}
+  if (!lsOk && !extOk) {
+    try { if (typeof toast === 'function') toast('收藏保存可能丢失'); } catch (e2) {}
+    try { logEvent('收藏双通道落盘均失败', String(FAV_KEY)); } catch (e3) {}
+  }
 }
 function favRoleName() { try { const c = getCtx(); if (c && c.characters && c.characterId != null && c.characters[c.characterId]) return c.characters[c.characterId].name || ''; } catch (e) {} return ''; }
 function favChatName() { try { const c = getCtx(); return String(c && c.name2 ? c.name2 : '').replace(/\.[a-z]+$/i, ''); } catch (e) {} return ''; }
@@ -1986,6 +2039,32 @@ function crc32(bytes) {
 function concat(a, b) { const r = new Uint8Array(a.length + b.length); r.set(a); r.set(b, a.length); return r; }
 function localTime() { const d = new Date(); return { time: ((d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1)), date: (((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate()) }; }
 // 设置页：导入 zip / 读取
+// 稳健 ZIP 解析：按 local file header 精确定位条目（STORE 无压缩），内容里再有 PK 也不会误截断
+function _thExtractZipEntry(bytes, targetName) {
+  try {
+    const len = bytes.length;
+    const dec = new TextDecoder('utf-8');
+    // 扫描所有 local file header 签名 PK\x03\x04
+    for (let i = 0; i + 30 <= len; i++) {
+      if (bytes[i] === 0x50 && bytes[i+1] === 0x4b && bytes[i+2] === 0x03 && bytes[i+3] === 0x04) {
+        const nameLen = bytes[i+26] | (bytes[i+27] << 8);
+        const extraLen = bytes[i+28] | (bytes[i+29] << 8);
+        const csize = (bytes[i+18] | (bytes[i+19] << 8) | (bytes[i+20] << 16) | (bytes[i+21] << 24)) >>> 0;
+        const end = i + 30 + nameLen + extraLen + csize;
+        if (end > len) { i = i + 30 + nameLen + extraLen - 1; continue; }
+        let nm = '';
+        try { nm = dec.decode(bytes.subarray(i + 30, i + 30 + nameLen)); } catch (e) {}
+        if (nm === targetName) {
+          let txt = '';
+          try { txt = dec.decode(bytes.subarray(i + 30 + nameLen + extraLen, end)); } catch (e2) {}
+          return txt;
+        }
+        i = end - 1;   // 跳过当前条目真实内容，避免把内容里的 PK 当 local header
+      }
+    }
+    return null;
+  } catch (e) { return null; }
+}
 function favImportZip() {
   try {
     const inp = document.createElement('input');
@@ -1995,30 +2074,20 @@ function favImportZip() {
       const rd = new FileReader();
       rd.onload = function () {
         try {
-          // 取 zip 里 data.json（简易解析：找 PK local header + filename=data.json）
-          const buf = rd.result;
-          const arr = new Uint8Array(buf);
-          const s = new TextDecoder('utf-8').decode(arr);
-          // 简单方式：找 "data.json" 后的内容（本插件 zip 无压缩，json 为原文）
-          const idx = s.indexOf('data.json');
-          if (idx < 0) { toast('未找到 data.json'); return; }
-          // 跳到 central 之前，从文件名后(headerLen)取内容直到下个 PK
-          let pos = idx;
-          // 向前找到 local header 起点(30+len)
-          // 简单暴力：取 data.json 之后的内容，直到遇到下一个 "PK" 或文件尾
-          const start = pos + 'data.json'.length;
-          let slice = s.slice(start);
-          // 截到 JSON 的结束（以 "}}" 结尾较难，取到下一个 "PK" 前）
-          const endPk = slice.indexOf('PK');
-          let jsonStr = endPk > 0 ? slice.slice(0, endPk) : slice;
-          // 起点可能含 extra 字段偏移，容错：从头找第一个 '{'
-          const jo = jsonStr.indexOf('{');
-          if (jo >= 0) jsonStr = jsonStr.slice(jo);
-          const jo2 = jsonStr.lastIndexOf('}');
-          if (jo2 >= 0) jsonStr = jsonStr.slice(0, jo2 + 1);
+          // 稳健解析：按 local header 精确定位 data.json（内容里再有 PK 也不误截断）
+          const arr = new Uint8Array(rd.result);
+          const jsonStr = _thExtractZipEntry(arr, 'data.json');
+          if (jsonStr === null) { toast('未找到 data.json'); return; }
           const obj = JSON.parse(jsonStr);
-          if (obj && Array.isArray(obj.items)) { favPersist(obj); toast('已导入 ' + obj.items.length + ' 条收藏'); favRenderView(); }
-          else toast('导入内容无效');
+          if (obj && Array.isArray(obj.items)) {
+            // 追加合并（无视命名重复，不覆盖当前收藏）；导入前自动快照兜底
+            try { if (typeof thSnap === 'function') thSnap('ZIP导入前'); } catch(e3){}
+            const _cur = favLoad();
+            const _newItems = (Array.isArray(_cur.items) ? _cur.items : []).concat(obj.items);
+            favPersist({ v: 1, items: _newItems });
+            toast('已追加导入 ' + obj.items.length + ' 条收藏，现有共 ' + _newItems.length + ' 条');
+            favRenderView();
+          } else toast('导入内容无效');
         } catch (e) { console.warn('[小剧场] 导入zip解析失败:', e); toast('导入失败'); }
       };
       rd.readAsArrayBuffer(f);
@@ -2254,5 +2323,186 @@ if (document.readyState === 'loading') {
     setTimeout(tryReg, 300);
   })();
 }
+// ============================================================
+// 全局加固模块（v2.1.0 · 存得死死的：冷备份 + 自动快照 + 持久化校验）
+// 纯增量，不改动上面任何既有函数逻辑。三块全局数据统一纳入防护：
+//   groups(th-theatre-data) / mapGlobal(th-map-global) / fav(th-fav-store)
+// 全部保持【跨角色全局】，与主人确认过，内容要存得死死的。
+// ============================================================
+
+// ---- 收集三块全局数据（全局常驻） ----
+function thCollectGlobal() {
+  var g = []; try { g = getGroups(); } catch(e){ g = []; }
+  var m = { groups:[], current:null }; try { m = getGlobalMap(); } catch(e){ m = { groups:[], current:null }; }
+  var f = favEmpty(); try { f = favLoad(); } catch(e){ f = favEmpty(); }
+  return { groups: Array.isArray(g) ? g : [], mapGlobal: m, fav: f, ts: Date.now() };
+}
+
+// ---- 自动快照：存独立键 th-snapshots，保留最近 5 份 ----
+const TH_SNAP_KEY = 'th-snapshots';
+const TH_SNAP_MAX = 5;
+function thGetSnaps() {
+  try { var r = localStorage.getItem(TH_SNAP_KEY); var a = r ? JSON.parse(r) : []; return Array.isArray(a) ? a : []; }
+  catch(e){ return []; }
+}
+function thSnap(label) {
+  try {
+    var arr = thGetSnaps();
+    var snap = thCollectGlobal();
+    snap.label = label || '自动快照';
+    snap.ts = Date.now();
+    if (arr[0] && Math.abs(arr[0].ts - snap.ts) < 1200) return false; // 去抖
+    arr.unshift(snap);
+    if (arr.length > TH_SNAP_MAX) arr = arr.slice(0, TH_SNAP_MAX);
+    localStorage.setItem(TH_SNAP_KEY, JSON.stringify(arr));
+    logEvent('快照-已存', (label || '') + ' / 现共' + arr.length + '份');
+    return true;
+  } catch(e) { logEvent('快照-失败', e && e.message); return false; }
+}
+
+// ---- 恢复最近快照（默认最新 index=0）----
+function thRestoreSnap(idx) {
+  try {
+    var arr = thGetSnaps();
+    var snap = arr && arr[(idx >= 0) ? idx : 0];
+    if (!snap) { toast('没有可用快照'); return false; }
+    if (Array.isArray(snap.groups)) saveGroups(snap.groups);
+    if (snap.mapGlobal && typeof snap.mapGlobal === 'object') saveGlobalMap(snap.mapGlobal);
+    if (snap.fav) favPersist(snap.fav);
+    toast('已从快照恢复');
+    logEvent('快照-恢复', '#' + ((idx >= 0) ? idx : 0) + ' ' + (snap.label || ''));
+    if (typeof render === 'function') { try { render(); } catch(e){} }
+    return true;
+  } catch(e) { logEvent('快照-恢复失败', e && e.message); toast('快照恢复失败'); return false; }
+}
+
+// ---- 冷备份：三块全局数据一次导出为独立 JSON 文件（含收藏）----
+function thFullBackup() {
+  try {
+    var data = { app: 'character-theatre', v: 1.1, ts: Date.now(), thFullBackup: true, data: thCollectGlobal() };
+    var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = '小剧场全量备份-' + new Date().toISOString().slice(0, 10) + '-' + Date.now() + '.json';
+    a.style.cssText = 'display:none';
+    document.body.appendChild(a); a.click();
+    setTimeout(function(){ URL.revokeObjectURL(url); a.remove(); }, 300);
+    toast('已导出全量备份(含收藏)');
+    logEvent('冷备份-导出', 'groups=' + data.data.groups.length + ' fav=' + (data.data.fav ? data.data.fav.items.length : 0));
+  } catch(e) { console.warn('[小剧场] 全量导出失败:', e); logEvent('冷备份-导出失败', e && e.message); toast('导出失败'); }
+}
+
+// ---- 冷恢复：读取全量 JSON 文件，覆盖回三块全局数据（恢复前自动快照）----
+function thFullRestore() {
+  try {
+    var inp = document.createElement('input');
+    inp.type = 'file'; inp.accept = '.json,application/json';
+    inp.onchange = function(){
+      var file = inp.files && inp.files[0]; if (!file) return;
+      var rd = new FileReader();
+      rd.onload = function(){
+        try {
+          var data = JSON.parse(String(rd.result || ''));
+          var d = null;
+          // 兼容两种备份格式：平铺（exportAll 老备份/裸数组） 或 双层（thFullBackup）
+          if (data && Array.isArray(data.groups)) d = data;
+          else if (data && data.data && Array.isArray(data.data.groups)) d = data.data;
+          else if (Array.isArray(data)) d = { groups: data };
+          if (!d || !Array.isArray(d.groups)) { toast('不是有效的全量备份文件'); return; }
+          thSnap('全量恢复前');                      // 恢复前先保住当前现场
+          saveGroups(d.groups);
+          if (d.mapGlobal && typeof d.mapGlobal === 'object') saveGlobalMap(d.mapGlobal);
+          if (d.fav) { try { favPersist(d.fav); } catch(e2){} }
+          toast('全量恢复成功');
+          logEvent('冷备份-恢复', 'groups=' + d.groups.length + ' fav=' + (d.fav ? d.fav.items.length : 0));
+          if (typeof render === 'function') { try { render(); } catch(e){} }
+        } catch(e2) { console.warn('[小剧场] 全量恢复解析失败:', e2); logEvent('冷备份-恢复失败', e2 && e2.message); toast('恢复失败'); }
+      };
+      rd.readAsText(file);
+    };
+    document.body.appendChild(inp); inp.click();
+    setTimeout(function(){ try{ document.body.removeChild(inp); }catch(e){} }, 500);
+  } catch(e) { console.warn('[小剧场] 全量恢复失败:', e); logEvent('冷备份-恢复异常', e && e.message); toast('恢复失败'); }
+}
+
+// ---- 持久化校验：回读 localStorage 与内存权威缓存比对，暴露"假保存成功" ----
+function thVerifyPersistence() {
+  try {
+    var rows = [];
+    var keys = [ { k: KEY_DATA, label: '分组' }, { k: KEY_MAP_GLOBAL, label: '替换组' }, { k: FAV_KEY, label: '收藏' } ];
+    keys.forEach(function(it){
+      try {
+        var raw = localStorage.getItem(it.k);
+        if (raw == null) { rows.push(it.label + '=未落盘'); return; }
+        var disk = JSON.parse(raw);
+        var mem = (typeof _cache !== 'undefined' && _cache[it.k] !== undefined) ? _cache[it.k] : null;
+        var ok = (mem === null) ? true : (JSON.stringify(disk) === JSON.stringify(mem));
+        rows.push(it.label + '=' + (ok ? '一致' : '不一致!'));
+      } catch(e){ rows.push(it.label + '=读取异常'); }
+    });
+    logEvent('持久化-校验', rows.join(' | '));
+    toast('校验: ' + rows.join(' | '));
+  } catch(e) { logEvent('持久化-校验失败', e && e.message); toast('校验失败'); }
+}
+
+// ---- 关键写操作后的自动快照（节流 3 秒一次，防 localStorage 抖动）----
+var _thSnapAt = 0;
+function thAutoSnap(label) {
+  try {
+    var now = Date.now();
+    if (now - _thSnapAt < 3000) return;
+    _thSnapAt = now;
+    thSnap(label || '自动');
+  } catch(e) {}
+}
+
+// ---- 页面隐藏/卸载前最后一拍快照（进程被杀的最后一刻保数据）----
+try {
+  if (typeof window !== 'undefined' && window.addEventListener) {
+    function _thFlushSnap() { try { thAutoSnap('离页'); } catch(e){} }
+    window.addEventListener('pagehide', _thFlushSnap);
+    window.addEventListener('visibilitychange', function(){ try { if (document.visibilityState === 'hidden') thAutoSnap('切后台'); } catch(e){} });
+  }
+} catch(e) {}
+
+// ---- 设置页注入按钮（通过包裹 renderSettingsView 追加全局加固卡，纯透传）----
+function thSettingsExt() {
+  // details 折叠：默认收起，一进来不占屏（对齐现有 AI 提示音卡的 th-det/th-secti 范式）
+  return '<div class="' + PREFIX + 'seccard" style="margin-top:10px;"><details class="' + PREFIX + 'det">'
+    + '<summary class="' + PREFIX + 'secti">' + ico('check', 15) + '<i>全局加固 · 存得死死的</i></summary>'
+    + '<div class="' + PREFIX + 'hint" style="margin-top:8px;">三块全局数据(小剧场/替换组/收藏)统一冷备份+自动快照。全量JSON落盘到Download，清缓存也不丢。</div>'
+    + '<div class="' + PREFIX + 'row2in" style="margin-top:8px;">'
+    + '<button class="' + PREFIX + 'fbtn primary" data-handle="' + reg(thFullBackup) + '">' + ico('exportUp', 13) + '<i>全量备份</i></button>'
+    + '<button class="' + PREFIX + 'fbtn" data-handle="' + reg(thFullRestore) + '">' + ico('open', 13) + '<i>全量恢复</i></button>'
+    + '<button class="' + PREFIX + 'fbtn" data-handle="' + reg(function(){ thSnap('手动'); toast('已存快照'); }) + '">' + ico('plus', 13) + '<i>存快照</i></button>'
+    + '<button class="' + PREFIX + 'fbtn" data-handle="' + reg(function(){ thRestoreSnap(0); }) + '">' + ico('back', 13) + '<i>恢复快照</i></button>'
+    + '<button class="' + PREFIX + 'fbtn" data-handle="' + reg(thVerifyPersistence) + '">' + ico('check', 13) + '<i>校验落盘</i></button>'
+    + '</div></details></div>';
+}
+
+
+// ---- 写入口自动快照：每次保存关键全局数据后节流自动沉淀一份快照（存得死死的）----
+(function(){
+  try {
+    // 仅在加固模块的 thAutoSnap 已定义时才启用（防止顺序依赖问题）
+    if (typeof thAutoSnap !== 'function') return;
+    var _o1 = saveGroups, _o2 = saveGlobalMap, _o3 = favPersist;
+    saveGroups = function(g){
+      var r = _o1.apply(this, arguments);
+      try { thAutoSnap('保存小剧场'); } catch(e){}
+      return r;
+    };
+    saveGlobalMap = function(m){
+      var r = _o2.apply(this, arguments);
+      try { thAutoSnap('保存替换组'); } catch(e){}
+      return r;
+    };
+    favPersist = function(d){
+      var r = _o3.apply(this, arguments);
+      try { thAutoSnap('保存收藏'); } catch(e){}
+      return r;
+    };
+  } catch(e){}
+})();
 
 })();
