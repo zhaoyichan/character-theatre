@@ -1,0 +1,12 @@
+{
+  "display_name": "小剧场",
+  "name": "character-theatre",
+  "id": "character-theatre",
+  "version": "2.0.0",
+  "description": "独立小剧场插件 v2.0：分组/条目收藏、宏替换、导入导出(JSON/ZIP/HTML)、可拖动悬浮球、收藏聊天记录(长按/★)、多选删除/导出/注入到聊天、单条消息拍照(PNG竖屏全文)/复制、收藏界面小剧场皮肤",
+  "type": "extension",
+  "js": "index.js",
+  "css": "style.css",
+  "author": "liwe和他的后宫老婆们",
+  "requires": []
+}
