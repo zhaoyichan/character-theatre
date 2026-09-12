@@ -1277,28 +1277,142 @@ registerChatDblclick();
 //   - 小剧场首页顶栏“小剧场”旁 ▶ = 进收藏查看界面（按角色分组 + 多选删除）
 // ============================================================
 const FAV_KEY = 'th-fav-store';
+// ---------- 收藏存储：IndexedDB 主存 + localStorage/扩展设置 兜底（v2.2 · 大容量） ----------
+// 历史：早期收藏存 localStorage 仅~5MB，存几十条含图收藏即爆容量，出现"加了却看不到"。
+// 现仿角色日记存档系统(cd-save-db)迁到 IndexedDB(GB级)，并保留 localStorage/扩展设置兜底。
+const FAV_IDB_DB = 'th-fav-db';
+const FAV_IDB_STORE = 'lib';
+let __favCache = null;   // 会话内权威快照（同步函数从它读，避免每次异步卡 UI）
+let __favBooted = false;
+function favIDBDb() {
+  return new Promise(function (res) {
+    if (!window.indexedDB) return res(null);
+    try {
+      const req = indexedDB.open(FAV_IDB_DB, 1);
+      req.onupgradeneeded = function (e) { const db = e.target.result; if (!db.objectStoreNames.contains(FAV_IDB_STORE)) db.createObjectStore(FAV_IDB_STORE, { keyPath: 'k' }); };
+      req.onsuccess = function (e) { res(e.target.result); };
+      req.onerror = function () { res(null); };
+    } catch (e) { res(null); }
+  });
+}
+function favIDBGet() {
+  return favIDBDb().then(function (db) {
+    if (!db) return null;
+    return new Promise(function (res) {
+      try {
+        const tx = db.transaction(FAV_IDB_STORE, 'readonly');
+        const r = tx.objectStore(FAV_IDB_STORE).get('main');
+        r.onsuccess = function () { const o = r.result; res((o && o.v) || null); };
+        r.onerror = function () { res(null); };
+      } catch (e) { res(null); }
+    });
+  }).catch(function () { return null; });
+}
+function favIDBSet(d) {
+  return favIDBDb().then(function (db) {
+    if (!db) return false;
+    return new Promise(function (res) {
+      try {
+        const tx = db.transaction(FAV_IDB_STORE, 'readwrite');
+        tx.objectStore(FAV_IDB_STORE).put({ k: 'main', v: d || favEmpty() });
+        tx.oncomplete = function () { res(true); };
+        tx.onerror = function () { res(false); };
+      } catch (e) { res(false); }
+    });
+  }).catch(function () { return false; });
+}
 function favEmpty() { return { v: 1, items: [] }; }
 function favLoad() {
-  try { const d = JSON.parse(localStorage.getItem(FAV_KEY) || 'null'); if (d && Array.isArray(d.items)) return d; } catch (e) {}
+  // 优先用会话内权威快照（IndexedDB 已灌入该缓存，避免每次异步卡 UI）
+  if (__favCache && Array.isArray(__favCache.items)) return __favCache;
+  // 缓存未就绪：回退同步读 localStorage/扩展设置（双通道取更新的一份），并回填缓存
+  let ls = null, extD = null;
+  try { const d = JSON.parse(localStorage.getItem(FAV_KEY) || ''); if (d && Array.isArray(d.items)) ls = d; } catch (e1) {}
   try {
     const ctx = (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) ? SillyTavern.getContext() : null;
     const ext = (ctx && ctx.extensionSettings) || (typeof extension_settings !== 'undefined' ? extension_settings : null);
     const d2 = ext && ext.character_theatre_fav;
-    if (d2 && Array.isArray(d2.items)) return d2;
-  } catch (e) {}
-  return favEmpty();
+    if (d2 && Array.isArray(d2.items)) extD = d2;
+  } catch (e2) {}
+  let picked;
+  if (ls && extD) {
+    if (ls === extD) picked = ls;
+    else if (extD.items.length > ls.items.length) picked = extD;
+    else if (ls.items.length > extD.items.length) picked = ls;
+    else {
+      const lt = ls.items.reduce((m, x) => Math.max(m, x.time || 0), 0);
+      const et = extD.items.reduce((m, x) => Math.max(m, x.time || 0), 0);
+      picked = et > lt ? extD : ls;
+    }
+  } else picked = ls || extD;
+  if (!picked) picked = favEmpty();
+  __favCache = picked;
+  return picked;
 }
 function favPersist(d) {
+  const data = (d && Array.isArray(d.items)) ? d : favEmpty();
+  // 同步：回填权威快照
+  __favCache = data;
+  // 同步兜底：localStorage + 扩展设置（尽力而为）
   let lsOk = false;
-  try { localStorage.setItem(FAV_KEY, JSON.stringify(d)); lsOk = true; }
-  catch (e) { try { console.error('[小剧场] localStorage 写收藏失败', e); } catch(e2){} }
+  try { localStorage.setItem(FAV_KEY, JSON.stringify(data)); lsOk = true; }
+  catch (e) { try { console.error('[小剧场] localStorage 写收藏失败(可能已达容量)', e); } catch(e2){} }
   let extOk = false;
-  // 兜底写扩展设置
-  try { const c = getCtx(); const s = (c && c.extensionSettings) || (typeof extension_settings !== 'undefined' ? extension_settings : null); if (s) { s.character_theatre_fav = d; extOk = true; if (typeof saveSettingsDebounced === 'function') saveSettingsDebounced(); } } catch (e) {}
+  try { const c = getCtx(); const s = (c && c.extensionSettings) || (typeof extension_settings !== 'undefined' ? extension_settings : null); if (s) { s.character_theatre_fav = data; extOk = true; if (typeof saveSettingsDebounced === 'function') saveSettingsDebounced(); } } catch (e) {}
   if (!lsOk && !extOk) {
     try { if (typeof toast === 'function') toast('收藏保存可能丢失'); } catch (e2) {}
     try { logEvent('收藏双通道落盘均失败', String(FAV_KEY)); } catch (e3) {}
   }
+  // 异步主存：写 IndexedDB（write-through，不阻塞 UI），失败仅记日志
+  favIDBSet(data).then(function (ok) {
+    try { logEvent('收藏-IDB', 'write=' + (ok ? 'OK' : 'FAIL') + ' items=' + data.items.length); } catch (e) {}
+  });
+  return { lsOk: !!lsOk, extOk: !!extOk };
+}
+// 迁移 + 启动引导：第一次把 localStorage/扩展设置老收藏搬进 IndexedDB 并灌缓存
+function favLegacyPick() {
+  let ls = null, extD = null;
+  try { const d = JSON.parse(localStorage.getItem(FAV_KEY) || ''); if (d && Array.isArray(d.items)) ls = d; } catch (e) {}
+  try {
+    const ctx = (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) ? SillyTavern.getContext() : null;
+    const ext = (ctx && ctx.extensionSettings) || (typeof extension_settings !== 'undefined' ? extension_settings : null);
+    const d2 = ext && ext.character_theatre_fav;
+    if (d2 && Array.isArray(d2.items)) extD = d2;
+  } catch (e) {}
+  if (ls && extD) {
+    if (ls === extD) return ls;
+    if (extD.items.length > ls.items.length) return extD;
+    if (ls.items.length > extD.items.length) return ls;
+    const lt = ls.items.reduce((m, x) => Math.max(m, x.time || 0), 0);
+    const et = extD.items.reduce((m, x) => Math.max(m, x.time || 0), 0);
+    return et > lt ? extD : ls;
+  }
+  return ls || extD || null;
+}
+function favBootstrap() {
+  if (__favBooted) return;
+  __favBooted = true;
+  try {
+    favIDBGet().then(function (idbStore) {
+      const legacy = favLegacyPick();
+      if (idbStore && Array.isArray(idbStore.items) && idbStore.items.length > 0) {
+        // IDB 已有数据（权威）：灌缓存 + 回填兜底一份
+        __favCache = idbStore;
+        try { localStorage.setItem(FAV_KEY, JSON.stringify(idbStore)); } catch (e) {}
+        try { const c = getCtx(); const s = (c && c.extensionSettings) || (typeof extension_settings !== 'undefined' ? extension_settings : null); if (s) { s.character_theatre_fav = idbStore; if (typeof saveSettingsDebounced === 'function') saveSettingsDebounced(); } } catch (e3) {}
+        try { logEvent('收藏-启动', 'IDB优先 items=' + idbStore.items.length); } catch (e) {}
+      } else if (legacy && Array.isArray(legacy.items) && legacy.items.length > 0) {
+        // IDB 空但老数据有 → 自动迁移进 IDB，并灌缓存（珍贵老收藏一个不丢）
+        __favCache = legacy;
+        favIDBSet(legacy).then(function (ok) {
+          try { logEvent('收藏-迁移', 'IDB迁移=' + (ok ? 'OK' : 'FAIL') + ' items=' + legacy.items.length); } catch (e) {}
+        });
+        try { logEvent('收藏-启动', '老数据迁移 items=' + legacy.items.length); } catch (e) {}
+      } else if (legacy) {
+        __favCache = legacy;
+      }
+    });
+  } catch (e) { try { console.warn('[小剧场] 收藏引导失败', e); } catch (e2) {} }
 }
 function favRoleName() { try { const c = getCtx(); if (c && c.characters && c.characterId != null && c.characters[c.characterId]) return c.characters[c.characterId].name || ''; } catch (e) {} return ''; }
 function favChatName() { try { const c = getCtx(); return String(c && c.name2 ? c.name2 : '').replace(/\.[a-z]+$/i, ''); } catch (e) {} return ''; }
@@ -1462,9 +1576,14 @@ function favCollectMes(mesEl) {
         startFloor: floor, endFloor: floor, time: Date.now(), note: '', title: title,
         msgs: [{ name: name, is_user: isUser, role: isUser ? 'user' : 'assistant', mes: m.mes || m.content || plain || '', rendered: rendered, floor: floor }]
       });
-      favPersist(store);
-      logEvent('收藏-存', '标题=' + title.length + ' 角色=' + role + ' 文本=' + String(plain).length + ' html=' + String(rendered).length);
-      toast('已收藏 · ' + role);
+      var res = favPersist(store);
+      logEvent('收藏-存', '标题=' + title.length + ' 角色=' + role + ' 文本=' + String(plain).length + ' html=' + String(rendered).length + ' ls=' + res.lsOk + ' ext=' + res.extOk);
+      if (res.lsOk || res.extOk) {
+        if (res.lsOk) { toast('已收藏 · ' + role); }
+        else { toast('已收藏(仅备份通道) · 请尽快全量备份'); }
+      } else {
+        toast('收藏保存失败，未落盘');
+      }
     });
   } catch (e) { console.warn('[小剧场] 收藏失败:', e); logEvent('收藏-异常', e && e.message); }
 }
@@ -2099,6 +2218,7 @@ function favImportZip() {
 // ---- 入口：只做悬浮球（主子钦点，绝不碰顶栏） ----
 function registerEntry() {
   try {
+    try { favBootstrap(); } catch (e) {}
     let fab = document.getElementById(PREFIX + 'fab');
     if (!fab) {
       fab = document.createElement('div');
