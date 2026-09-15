@@ -2360,7 +2360,7 @@ function thCaptureOne(mes) {
     function startRaster() {
       try {
         const host = document.createElement('div');
-        host.style.cssText = 'position:fixed;left:-99999px;top:0;width:520px;background:#fff;padding:16px;box-sizing:border-box;z-index:-1;word-break:break-word;';
+        host.style.cssText = 'position:absolute;top:0;left:0;visibility:hidden;pointer-events:none;width:520px;background:#fff;padding:16px;box-sizing:border-box;z-index:-1;word-break:break-word;';
         host.appendChild(cl);
         document.body.appendChild(host);
         const w = host.scrollWidth || 520;
