@@ -2371,7 +2371,9 @@ function thCaptureOne(mes) {
           + '<foreignObject width="100%" height="100%">'
           + '<div xmlns="http://www.w3.org/1999/xhtml" style="width:' + w + 'px;min-height:' + h + 'px;background:#fff;color:#222;font:14px/1.7 sans-serif;word-break:break-word;">'
           + inner + '</div></foreignObject></svg>';
-        const url = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+        const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        setTimeout(function(){ try { URL.revokeObjectURL(url); } catch (e) {} }, 4000);
         const img = new Image();
         img.onload = function () {
           try {
@@ -2391,16 +2393,24 @@ function thCaptureOne(mes) {
       try {
         const txt = collectGetMesText(mes) || String(mes.innerText || '');
         logEvent('拍照-兜底-文本长度', String(txt).length);
+        // 取说话人 / 楼层 / 是否用户，做顶部横幅（兜底也要看得出是谁说的）
+        let who = '', isUser = false, floor = -1;
+        try {
+          floor = mesFloor(mes);
+          const c = getCtx(); const chat = (c && c.chat) ? c.chat : [];
+          if (floor >= 0 && chat[floor]) { who = String(chat[floor].name || ''); isUser = !!chat[floor].is_user; }
+          if (!who) { const nm = mes.querySelector && mes.querySelector('.mes_name'); if (nm) who = String(nm.textContent || '').trim(); }
+          if (!who) who = isUser ? '你' : '角色';
+        } catch (e) {}
         const g0 = document.createElement('canvas').getContext('2d');
-        // 竖屏：窄一点（~620 物理像素内约 520 逻辑），高度随内容增长
-        const pageW = 520, fontPx = 17, lh = 30, padX = 22, padTop = 24, padBottom = 24;
+        // 竖屏：窄一点（520 逻辑宽），高度随内容增长
+        const pageW = 520, fontPx = 17, lh = 30, padX = 22, padTop = 24, padBottom = 24, bannerH = 44;
         g0.font = fontPx + 'px sans-serif';
         const avail = pageW - padX * 2;
         const lines = [];
         String(txt).split(/\r?\n/).forEach(function (src) {
           let seg = String(src || ' ');
           if (!seg.trim() && seg.length === 0) seg = ' ';
-          // 按宽度自动换行
           while (g0.measureText(seg).width > avail) {
             let cut = seg.length - 1;
             while (cut > 0 && g0.measureText(seg.slice(0, cut)).width > avail) cut--;
@@ -2409,16 +2419,25 @@ function thCaptureOne(mes) {
           }
           lines.push(seg);
         });
-        const pageW2 = pageW, pageH = Math.max(200, padTop + padBottom + lines.length * lh);
+        const pageH = Math.max(200, bannerH + padTop + padBottom + lines.length * lh);
         const c = document.createElement('canvas');
-        c.width = Math.ceil(pageW2); c.height = Math.ceil(pageH);
+        c.width = Math.ceil(pageW); c.height = Math.ceil(pageH);
         const g = c.getContext('2d');
-        g.fillStyle = '#ffffff'; g.fillRect(0, 0, c.width, c.height);
-        g.fillStyle = '#222222'; g.font = fontPx + 'px sans-serif';
-        let y = padTop;
+        // 底：浅米白（护眼，对齐小剧场风格）
+        g.fillStyle = '#f6f5f1'; g.fillRect(0, 0, c.width, c.height);
+        // 顶部角色横幅：用户=金，角色=深藏青
+        const bannerBg = isUser ? '#b98a4b' : '#16263b';
+        g.fillStyle = bannerBg; g.fillRect(0, 0, c.width, bannerH);
+        g.fillStyle = '#f6f5f1'; g.font = 'bold 15px sans-serif'; g.textAlign = 'left'; g.textBaseline = 'middle';
+        let headTxt = who;
+        if (floor >= 0) headTxt += '  ·  第' + floor + '楼';
+        g.fillText(headTxt, padX, bannerH / 2);
+        // 正文
+        g.fillStyle = '#222222'; g.font = fontPx + 'px sans-serif'; g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+        let y = bannerH + padTop;
         lines.forEach(function (ln) { g.fillText(ln, padX, y); y += lh; });
         savePng(c.toDataURL('image/png'), '小剧场-消息.png');
-        logEvent('拍照-成功-兜底', '竖屏全文 ' + lines.length + '行 ' + c.width + 'x' + c.height);
+        logEvent('拍照-成功-兜底', '竖屏全文 ' + lines.length + '行 ' + c.width + 'x' + c.height + ' who=' + who);
       } catch (e4) { console.warn('[小剧场] 纯文本兜底失败:', e4); logEvent('拍照-异常', (e4 && e4.message)); toast('这条消息图片导出失败'); }
     }
     function savePng(png, name) {
