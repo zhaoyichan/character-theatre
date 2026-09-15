@@ -2442,12 +2442,33 @@ function thCaptureOne(mes) {
     }
     function savePng(png, name) {
       try {
-        const a = document.createElement('a');
-        a.href = png; a.download = name; a.style.cssText = 'display:none';
+        // 安卓 WebView：a.download 塞超长 dataURL 会触发原生下载桥
+        // "Java exception was raised during method invocation"。必须转 Blob URL（对齐柏宝绘已验证姿势）。
+        var parts = String(png).split(',');
+        var mime = (parts[0].match(/data:([^;]+)/) || [])[1] || 'image/png';
+        var bin = '';
+        try { bin = atob(parts[1] || ''); }
+        catch (binErr) { try { bin = decodeURIComponent(parts[1] || ''); } catch (binErr2) { bin = ''; } }
+        var bytes = new Uint8Array(bin.length);
+        for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        var blob = new Blob([bytes], { type: mime });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url; a.download = name; a.style.cssText = 'display:none';
         document.body.appendChild(a); a.click();
-        setTimeout(function(){ a.remove(); }, 300);
+        setTimeout(function(){ try { a.remove(); URL.revokeObjectURL(url); } catch (e) {} }, 400);
         toast('已保存图片 PNG');
-      } catch (e) { console.warn('[小剧场] 保存PNG失败:', e); logEvent('拍照-保存失败', (e && e.message)); toast('图片保存失败'); }
+        logEvent('拍照-保存成功', 'blob ' + bytes.length + 'B ' + mime);
+      } catch (saveErr) {
+        // 极老 WebView 无 Blob/atob 支持时退回 dataURL（尽力而为）
+        try {
+          var a2 = document.createElement('a');
+          a2.href = png; a2.download = name; a2.style.cssText = 'display:none';
+          document.body.appendChild(a2); a2.click();
+          setTimeout(function(){ try { a2.remove(); } catch (e) {} }, 300);
+          toast('已保存图片 PNG');
+        } catch (e2) { console.warn('[小剧场] 保存PNG失败:', saveErr); logEvent('拍照-保存失败', (saveErr && saveErr.message)); toast('图片保存失败'); }
+      }
     }
   } catch (e) { console.warn('[小剧场] 单条拍照失败:', e); logEvent('拍照-异常', (e && e.message)); toast('拍照失败'); }
 }
