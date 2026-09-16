@@ -2451,7 +2451,7 @@ function thCaptureOne(mes) {
         logEvent('FU-1', 'b64len=' + base64.length);
         var ctx = (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) ? SillyTavern.getContext() : null;
         var headers = (ctx && typeof ctx.getRequestHeaders === 'function') ? ctx.getRequestHeaders() : {};
-        var fname = (name || 'shot') + '_' + Date.now() + '.png';
+        var fname = 'shot_' + Date.now() + '.png'; // 上传文件名只能纯ASCII(酒files拒绝中文名)
         logEvent('FU-2', 'uploading ' + fname);
         fetch('/api/files/upload', {
           method: 'POST',
