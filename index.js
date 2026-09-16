@@ -2440,31 +2440,49 @@ function thCaptureOne(mes) {
     }
 
 
+
+
     function thDoSave(png, name) {
       try {
-        logEvent('SV-0', 'enter');
-        var parts = String(png).split(',');
-        logEvent('SV-1', 'parts=' + parts.length);
-        var mime = (parts[0].match(/data:([^;]+)/) || [])[1] || 'image/png';
-        var bin = '';
-        try { bin = atob(parts[1] || ''); logEvent('SV-2', 'atob=' + bin.length); }
-        catch (e) { try { bin = decodeURIComponent(parts[1] || ''); logEvent('SV-2b', 'dec=' + bin.length); } catch (e2) { bin = ''; logEvent('SV-2c', 'decodeFail'); } }
-        var bytes = new Uint8Array(bin.length);
-        for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-        logEvent('SV-3', 'bytes=' + bytes.length);
-        var blob = new Blob([bytes], { type: mime });
-        logEvent('SV-4', 'blob=' + blob.size);
-        var url = URL.createObjectURL(blob);
-        logEvent('SV-5', 'url=' + String(url).slice(0, 24));
+        logEvent('FU-0', 'enter');
+        var base64 = String(png);
+        var comma = base64.indexOf(',');
+        if (comma >= 0) base64 = base64.slice(comma + 1);
+        logEvent('FU-1', 'b64len=' + base64.length);
+        var ctx = (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) ? SillyTavern.getContext() : null;
+        var headers = (ctx && typeof ctx.getRequestHeaders === 'function') ? ctx.getRequestHeaders() : {};
+        var fname = (name || 'shot') + '_' + Date.now() + '.png';
+        logEvent('FU-2', 'uploading ' + fname);
+        fetch('/api/files/upload', {
+          method: 'POST',
+          headers: headers,
+          body: JSON.stringify({ name: fname, data: base64 })
+        }).then(function (r) { return r.text(); }).then(function (txt) {
+          var path = '';
+          try { var o = JSON.parse(txt); if (o && typeof o.path === 'string') path = o.path; } catch (e) {}
+          if (path) {
+            logEvent('FU-3', 'ok path=' + path);
+            thHttpDownload(path, name);
+          } else {
+            logEvent('FU-4', 'noPath ' + String(txt).slice(0, 200));
+            toast('上传未返回路径\uff08见日志 FU-4\uff09\uff1b请长按图\u7247\u4fdd\u5b58');
+          }
+        }).catch(function (err) { logEvent('FU-5', 'fetchErr ' + ((err && err.message) || String(err))); toast('\u4fdd\u5b58\u5931\u8d25\uff1a\u8bf7\u957f\u6309\u56fe\u7247\u4fdd\u5b58'); });
+      } catch (e) { logEvent('FU-err', (e && e.message) || String(e)); toast('\u4fdd\u5b58\u5931\u8d25\uff1a\u8bf7\u957f\u6309\u56fe\u7247\u4fdd\u5b58'); }
+    }
+    // 用上传得到的 http/相对路径下载（遯开 blob 下载引擎）
+    function thHttpDownload(path, name) {
+      try {
+        var url = path;
+        if (url && url.indexOf('http') !== 0 && url.charAt(0) !== '/') { url = '/' + url; }
+        logEvent('FU-6', 'go ' + url);
         var a = document.createElement('a');
-        a.href = url; a.download = name; a.style.cssText = 'display:none';
-        document.body.appendChild(a);
-        logEvent('SV-6', 'preClick');
-        a.click();
-        logEvent('SV-7', 'clicked-noJSErr');
-        setTimeout(function(){ try { a.remove(); URL.revokeObjectURL(url); } catch (e) {} }, 600);
-        toast('已触发保存');
-      } catch (e) { console.warn('[小剧场] 手势保存失败:', e); logEvent('SV-err', (e && e.message) || String(e)); toast('保存失败：请长按图片保存'); }
+        a.href = url; a.download = (name || 'shot') + '.png'; a.target = '_blank'; a.rel = 'noopener';
+        a.style.cssText = 'display:none';
+        document.body.appendChild(a); a.click();
+        logEvent('FU-7', 'clicked ' + url);
+        setTimeout(function(){ try { a.remove(); } catch (e) {} }, 400);
+      } catch (e) { logEvent('FU-8', (e && e.message) || String(e)); toast('\u4e0b\u8f7d\u5931\u8d25\uff0c\u8bf7\u957f\u6309\u56fe\u7247\u4fdd\u5b58'); }
     }
 
     function thShowPreview(png, name) {
