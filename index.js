@@ -2438,24 +2438,35 @@ function thCaptureOne(mes) {
       try { thShowPreview(png, name); }
       catch (e) { console.warn('[小剧场] 预览层失败:', e); logEvent('拍照保存异常', (e && e.message)); }
     }
+
+
     function thDoSave(png, name) {
       try {
+        logEvent('SV-0', 'enter');
         var parts = String(png).split(',');
+        logEvent('SV-1', 'parts=' + parts.length);
         var mime = (parts[0].match(/data:([^;]+)/) || [])[1] || 'image/png';
         var bin = '';
-        try { bin = atob(parts[1] || ''); } catch (e) { try { bin = decodeURIComponent(parts[1] || ''); } catch (e2) { bin = ''; } }
+        try { bin = atob(parts[1] || ''); logEvent('SV-2', 'atob=' + bin.length); }
+        catch (e) { try { bin = decodeURIComponent(parts[1] || ''); logEvent('SV-2b', 'dec=' + bin.length); } catch (e2) { bin = ''; logEvent('SV-2c', 'decodeFail'); } }
         var bytes = new Uint8Array(bin.length);
         for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        logEvent('SV-3', 'bytes=' + bytes.length);
         var blob = new Blob([bytes], { type: mime });
+        logEvent('SV-4', 'blob=' + blob.size);
         var url = URL.createObjectURL(blob);
+        logEvent('SV-5', 'url=' + String(url).slice(0, 24));
         var a = document.createElement('a');
         a.href = url; a.download = name; a.style.cssText = 'display:none';
-        document.body.appendChild(a); a.click();
+        document.body.appendChild(a);
+        logEvent('SV-6', 'preClick');
+        a.click();
+        logEvent('SV-7', 'clicked-noJSErr');
         setTimeout(function(){ try { a.remove(); URL.revokeObjectURL(url); } catch (e) {} }, 600);
-        toast('已触发保存：请到 下载/相册 查看');
-        logEvent('拍照保存手势', 'blob ' + bytes.length + 'B ' + mime);
-      } catch (e) { console.warn('[小剧场] 手势保存失败:', e); logEvent('拍照保存异常', (e && e.message)); toast('保存失败：请长按图片，用系统菜单保存到相册'); }
+        toast('已触发保存');
+      } catch (e) { console.warn('[小剧场] 手势保存失败:', e); logEvent('SV-err', (e && e.message) || String(e)); toast('保存失败：请长按图片保存'); }
     }
+
     function thShowPreview(png, name) {
       try {
         document.querySelectorAll('#' + PREFIX + 'pv').forEach(function (n) { n.remove(); });
