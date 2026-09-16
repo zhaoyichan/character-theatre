@@ -1353,21 +1353,13 @@ function favPersist(d) {
   const data = (d && Array.isArray(d.items)) ? d : favEmpty();
   // 同步：回填权威快照
   __favCache = data;
-  // 同步兜底：localStorage + 扩展设置（尽力而为）
-  let lsOk = false;
-  try { localStorage.setItem(FAV_KEY, JSON.stringify(data)); lsOk = true; }
-  catch (e) { try { console.error('[小剧场] localStorage 写收藏失败(可能已达容量)', e); } catch(e2){} }
-  let extOk = false;
-  try { const c = getCtx(); const s = (c && c.extensionSettings) || (typeof extension_settings !== 'undefined' ? extension_settings : null); if (s) { s.character_theatre_fav = data; extOk = true; if (typeof saveSettingsDebounced === 'function') saveSettingsDebounced(); } } catch (e) {}
-  if (!lsOk && !extOk) {
-    try { if (typeof toast === 'function') toast('收藏保存可能丢失'); } catch (e2) {}
-    try { logEvent('收藏双通道落盘均失败', String(FAV_KEY)); } catch (e3) {}
-  }
-  // 异步主存：写 IndexedDB（write-through，不阻塞 UI），失败仅记日志
+  // 收藏大内容只写 IndexedDB（GB级）；不再写 localStorage 的 5MB 配额、也不写酒馆扩展设置，
+  // 避免含图收藏把 localStorage 撑爆 → 保存相册时 WebView 写临时存储失败 → 抛 Java exception。
+  // IndexedDB 为主存，完整收藏一条不少。
   favIDBSet(data).then(function (ok) {
     try { logEvent('收藏-IDB', 'write=' + (ok ? 'OK' : 'FAIL') + ' items=' + data.items.length); } catch (e) {}
   });
-  return { lsOk: !!lsOk, extOk: !!extOk };
+  return { lsOk: false, extOk: false, idb: true };
 }
 // 迁移 + 启动引导：第一次把 localStorage/扩展设置老收藏搬进 IndexedDB 并灌缓存
 function favLegacyPick() {
@@ -1398,8 +1390,9 @@ function favBootstrap() {
       if (idbStore && Array.isArray(idbStore.items) && idbStore.items.length > 0) {
         // IDB 已有数据（权威）：灌缓存 + 回填兜底一份
         __favCache = idbStore;
-        try { localStorage.setItem(FAV_KEY, JSON.stringify(idbStore)); } catch (e) {}
-        try { const c = getCtx(); const s = (c && c.extensionSettings) || (typeof extension_settings !== 'undefined' ? extension_settings : null); if (s) { s.character_theatre_fav = idbStore; if (typeof saveSettingsDebounced === 'function') saveSettingsDebounced(); } } catch (e3) {}
+        // 收藏已在 IndexedDB 主存：清掉 localStorage 里历史遗留的冗余大收藏，把 5MB 配额腾出来（不丢收藏）
+        try { localStorage.removeItem(FAV_KEY); } catch (e) {}
+        try { const c = getCtx(); const s = (c && c.extensionSettings) || (typeof extension_settings !== 'undefined' ? extension_settings : null); if (s) { try { delete s.character_theatre_fav; } catch (e) {} try { if (typeof saveSettingsDebounced === 'function') saveSettingsDebounced(); } catch (e) {} } } catch (e3) {}
         try { logEvent('收藏-启动', 'IDB优先 items=' + idbStore.items.length); } catch (e) {}
       } else if (legacy && Array.isArray(legacy.items) && legacy.items.length > 0) {
         // IDB 空但老数据有 → 自动迁移进 IDB，并灌缓存（珍贵老收藏一个不丢）
