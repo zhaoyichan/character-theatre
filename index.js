@@ -2442,14 +2442,15 @@ function thCaptureOne(mes) {
       } catch (e4) { console.warn('[小剧场] 纯文本兜底失败:', e4); logEvent('拍照-异常', (e4 && e4.message)); toast('这条消息图片导出失败'); }
     }
     function savePng(png, name) {
+      try { thShowPreview(png, name); }
+      catch (e) { console.warn('[小剧场] 预览层失败:', e); logEvent('拍照保存异常', (e && e.message)); }
+    }
+    function thDoSave(png, name) {
       try {
-        // 安卓 WebView：a.download 塞超长 dataURL 会触发原生下载桥
-        // "Java exception was raised during method invocation"。必须转 Blob URL（对齐柏宝绘已验证姿势）。
         var parts = String(png).split(',');
         var mime = (parts[0].match(/data:([^;]+)/) || [])[1] || 'image/png';
         var bin = '';
-        try { bin = atob(parts[1] || ''); }
-        catch (binErr) { try { bin = decodeURIComponent(parts[1] || ''); } catch (binErr2) { bin = ''; } }
+        try { bin = atob(parts[1] || ''); } catch (e) { try { bin = decodeURIComponent(parts[1] || ''); } catch (e2) { bin = ''; } }
         var bytes = new Uint8Array(bin.length);
         for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
         var blob = new Blob([bytes], { type: mime });
@@ -2457,20 +2458,44 @@ function thCaptureOne(mes) {
         var a = document.createElement('a');
         a.href = url; a.download = name; a.style.cssText = 'display:none';
         document.body.appendChild(a); a.click();
-        setTimeout(function(){ try { a.remove(); URL.revokeObjectURL(url); } catch (e) {} }, 400);
-        toast('已保存图片 PNG');
-        logEvent('拍照-保存成功', 'blob ' + bytes.length + 'B ' + mime);
-      } catch (saveErr) {
-        // 极老 WebView 无 Blob/atob 支持时退回 dataURL（尽力而为）
-        try {
-          var a2 = document.createElement('a');
-          a2.href = png; a2.download = name; a2.style.cssText = 'display:none';
-          document.body.appendChild(a2); a2.click();
-          setTimeout(function(){ try { a2.remove(); } catch (e) {} }, 300);
-          toast('已保存图片 PNG');
-        } catch (e2) { console.warn('[小剧场] 保存PNG失败:', saveErr); logEvent('拍照-保存失败', (saveErr && saveErr.message)); toast('图片保存失败'); }
-      }
+        setTimeout(function(){ try { a.remove(); URL.revokeObjectURL(url); } catch (e) {} }, 600);
+        toast('已触发保存：请到 下载/相册 查看');
+        logEvent('拍照保存手势', 'blob ' + bytes.length + 'B ' + mime);
+      } catch (e) { console.warn('[小剧场] 手势保存失败:', e); logEvent('拍照保存异常', (e && e.message)); toast('保存失败：请长按图片，用系统菜单保存到相册'); }
     }
+    function thShowPreview(png, name) {
+      try {
+        document.querySelectorAll('#' + PREFIX + 'pv').forEach(function (n) { n.remove(); });
+        var wrap = document.createElement('div');
+        wrap.id = PREFIX + 'pv';
+        wrap.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:9999999;display:flex;align-items:center;justify-content:center;background:rgba(24,28,34,.55);';
+        var box = document.createElement('div');
+        box.style.cssText = 'width:min(94vw,480px);max-height:92vh;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 18px 50px rgba(20,24,30,.4);display:flex;flex-direction:column;';
+        var top = document.createElement('div');
+        top.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 12px;background:#16263b;color:#f6f5f1;flex-shrink:0;';
+        top.innerHTML = '<span style="flex:1;font-weight:700;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(name || '图片预览') + '</span>'
+          + '<button id="' + PREFIX + 'pv_save" style="display:inline-flex;align-items:center;gap:5px;border:0;border-radius:8px;padding:6px 12px;background:#b98a4b;color:#fff;font-size:12px;font-weight:600;cursor:pointer;">' + ico('download', 13) + '保存到相册</button>'
+          + '<button id="' + PREFIX + 'pv_close" style="border:0;background:transparent;color:#f6f5f1;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;">' + ico('close', 15) + '</button>';
+        box.appendChild(top);
+        var imgs = document.createElement('div');
+        imgs.style.cssText = 'flex:1;min-height:0;overflow:auto;background:#edeae2;padding:12px;';
+        imgs.innerHTML = '<img src="' + png + '" alt="长按可保存" style="display:block;width:100%;height:auto;border-radius:6px;">';
+        box.appendChild(imgs);
+        var foot = document.createElement('div');
+        foot.style.cssText = 'padding:7px 12px;font-size:11px;color:#8b8f96;background:#f4f2ec;flex-shrink:0;text-align:center;';
+        foot.textContent = '点上方保存到相册按钮；也可长按这幅图，用系统菜单保存图片';
+        box.appendChild(foot);
+        wrap.appendChild(box);
+        document.body.appendChild(wrap);
+        var saveBtn = document.getElementById(PREFIX + 'pv_save');
+        if (saveBtn) saveBtn.onclick = function (ev) { ev.preventDefault(); ev.stopPropagation(); try { thDoSave(png, name); wrap.remove(); } catch (e) {} };
+        var closeBtn = document.getElementById(PREFIX + 'pv_close');
+        if (closeBtn) closeBtn.onclick = function (ev) { ev.preventDefault(); ev.stopPropagation(); wrap.remove(); };
+        wrap.addEventListener('click', function (e) { if (e.target === wrap) wrap.remove(); });
+        logEvent('拍照预览', '打开预览层');
+      } catch (e) { console.warn('[小剧场] 预览层异常:', e); logEvent('拍照预览异常', (e && e.message)); }
+    }
+
   } catch (e) { console.warn('[小剧场] 单条拍照失败:', e); logEvent('拍照-异常', (e && e.message)); toast('拍照失败'); }
 }
 // 即插件加载即挂悬浮球；页面还没好就重试几次
