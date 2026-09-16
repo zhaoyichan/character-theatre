@@ -2219,6 +2219,7 @@ function favImportZip() {
 function registerEntry() {
   try {
     try { favBootstrap(); } catch (e) {}
+    try { thSnapBootstrap(); } catch (e) {}
     let fab = document.getElementById(PREFIX + 'fab');
     if (!fab) {
       fab = document.createElement('div');
@@ -2498,26 +2499,68 @@ function thCollectGlobal() {
   return { groups: Array.isArray(g) ? g : [], mapGlobal: m, fav: f, ts: Date.now() };
 }
 
-// ---- 自动快照：存独立键 th-snapshots，保留最近 5 份 ----
-const TH_SNAP_KEY = 'th-snapshots';
+// ---- 自动快照：已从 localStorage 迁到 IndexedDB（localStorage 配额仅~5MB，含图收藏快照会撑爆→QuotaExceeded→连带拖崩拍照/收藏落盘；IndexedDB GB级，根治）----
 const TH_SNAP_MAX = 5;
-function thGetSnaps() {
-  try { var r = localStorage.getItem(TH_SNAP_KEY); var a = r ? JSON.parse(r) : []; return Array.isArray(a) ? a : []; }
-  catch(e){ return []; }
+const TH_SNAP_DB = 'th-snap-db';
+const TH_SNAP_STORE = 'snap';
+let __snapArr = [];                 // 会话内权威快照（同步读，避免异步卡 UI）
+let __snapBooted = false;
+function thSnapIDBOpen() {
+  return new Promise(function (res) {
+    if (!window.indexedDB) return res(null);
+    try {
+      var req = indexedDB.open(TH_SNAP_DB, 1);
+      req.onupgradeneeded = function (e) { var db = e.target.result; if (!db.objectStoreNames.contains(TH_SNAP_STORE)) db.createObjectStore(TH_SNAP_STORE, { keyPath: 'k' }); };
+      req.onsuccess = function (e) { res(e.target.result); };
+      req.onerror = function () { res(null); };
+    } catch (e) { res(null); }
+  });
 }
+function thSnapIDBRead() {
+  return thSnapIDBOpen().then(function (db) {
+    if (!db) return [];
+    return new Promise(function (res) {
+      try {
+        var tx = db.transaction(TH_SNAP_STORE, 'readonly');
+        var r = tx.objectStore(TH_SNAP_STORE).get('main');
+        r.onsuccess = function () { var o = r.result; res((o && Array.isArray(o.v)) ? o.v : []); };
+        r.onerror = function () { res([]); };
+      } catch (e) { res([]); }
+    });
+  }).catch(function () { return []; });
+}
+function thSnapIDBWrite(arr) {
+  return thSnapIDBOpen().then(function (db) {
+    if (!db) return false;
+    return new Promise(function (res) {
+      try {
+        var tx = db.transaction(TH_SNAP_STORE, 'readwrite');
+        tx.objectStore(TH_SNAP_STORE).put({ k: 'main', v: arr });
+        tx.oncomplete = function () { res(true); };
+        tx.onerror = function () { res(false); };
+      } catch (e) { res(false); }
+    });
+  }).catch(function () { return false; });
+}
+function thSnapBootstrap() {
+  if (__snapBooted) return;
+  __snapBooted = true;
+  try { localStorage.removeItem('th-snapshots'); } catch (e) {}  // 清理旧的 localStorage 大快照，腾出配额
+  thSnapIDBRead().then(function (arr) { if (Array.isArray(arr) && arr.length) __snapArr = arr; try { logEvent('快照-载入', 'IDB ' + __snapArr.length + '份'); } catch (e) {} });
+}
+function thGetSnaps() { return __snapArr; }
 function thSnap(label) {
   try {
-    var arr = thGetSnaps();
     var snap = thCollectGlobal();
     snap.label = label || '自动快照';
     snap.ts = Date.now();
-    if (arr[0] && Math.abs(arr[0].ts - snap.ts) < 1200) return false; // 去抖
-    arr.unshift(snap);
-    if (arr.length > TH_SNAP_MAX) arr = arr.slice(0, TH_SNAP_MAX);
-    localStorage.setItem(TH_SNAP_KEY, JSON.stringify(arr));
-    logEvent('快照-已存', (label || '') + ' / 现共' + arr.length + '份');
+    if (__snapArr[0] && Math.abs(__snapArr[0].ts - snap.ts) < 1200) return false; // 去抖
+    __snapArr.unshift(snap);
+    if (__snapArr.length > TH_SNAP_MAX) __snapArr = __snapArr.slice(0, TH_SNAP_MAX);
+    thSnapIDBWrite(__snapArr);            // 写 IndexedDB（不再占 localStorage 配额）
+    logEvent('快照-已存', (label || '') + ' / 现共' + __snapArr.length + '份');
     return true;
-  } catch(e) { logEvent('快照-失败', e && e.message); return false; }
+  } catch (e) { logEvent('快照-失败', e && e.message); return false; }
 }
 
 // ---- 恢复最近快照（默认最新 index=0）----
