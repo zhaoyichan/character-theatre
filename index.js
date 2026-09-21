@@ -2060,7 +2060,8 @@ function favExportZip() {
       // 生成 zip（手动 ZIP 打包：简单用 Base64 + 两个内容，交给 zip 库太重；这里导出为 self-extract 的 html + json 两个文件）
       // 简化：导出成一个 zip 需要库；此处用「下载单个 .zip 内含 html+json」——先尝试用 Blob + zip 不引库较难。
       // 退而：直接导出 html（可含图）+ 提示 json 在其中。为满足「zip」，用一个简单 zip 打包（store 存 html 和 data）
-      buildZipAndDownload({ 'index.html': html, 'data.json': data });
+      const stData = JSON.stringify({ version: 1, groups: getGroups(), mapGlobal: getGlobalMap() }, null, 2);
+      buildZipAndDownload({ 'index.html': html, 'data.json': data, 'smalltheatre.json': stData });
     });
   } catch (e) { console.warn('[小剧场] 导出zip失败:', e); toast('导出失败'); }
 }
@@ -2177,6 +2178,25 @@ function _thExtractZipEntry(bytes, targetName) {
     return null;
   } catch (e) { return null; }
 }
+function _thMergeGroups(groups) {
+  try {
+    var gs = getGroups();
+    if (!Array.isArray(groups)) return;
+    groups.forEach(function (ig) {
+      if (!ig || typeof ig.name !== 'string') return;
+      var g = gs.find(function (x) { return x && x.name === ig.name; });
+      var incoming = Array.isArray(ig.items) ? ig.items : [];
+      if (!g) { gs.push({ name: ig.name, items: incoming.slice() }); return; }
+      if (!Array.isArray(g.items)) g.items = [];
+      incoming.forEach(function (it) {
+        if (!it || typeof it.title !== 'string') return;
+        var dup = g.items.some(function (e) { return e && e.title === it.title && e.content === it.content; });
+        if (!dup) g.items.push({ title: it.title, content: it.content || '', fav: !!it.fav });
+      });
+    });
+    saveGroups(gs);
+  } catch (e) {}
+}
 function favImportZip() {
   try {
     const inp = document.createElement('input');
@@ -2199,6 +2219,7 @@ function favImportZip() {
             favPersist({ v: 1, items: _newItems });
             toast('已追加导入 ' + obj.items.length + ' 条收藏，现有共 ' + _newItems.length + ' 条');
             favRenderView();
+            { try { var stStr2 = _thExtractZipEntry(arr, 'smalltheatre.json'); if (stStr2 !== null) { var st2 = JSON.parse(stStr2); if (st2 && Array.isArray(st2.groups)) { _thMergeGroups(st2.groups); if (st2.mapGlobal && typeof st2.mapGlobal === 'object') saveGlobalMap(st2.mapGlobal); toast('；小剧场分组/替换组已合并'); } } } catch (e2m) {} }
           } else toast('导入内容无效');
         } catch (e) { console.warn('[小剧场] 导入zip解析失败:', e); toast('导入失败'); }
       };
